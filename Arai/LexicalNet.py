@@ -12,38 +12,65 @@ import csv
 
 import sqlite3
 
+from configs import *
+
 # ログ
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)-7s %(message)s')
 logger = logging.getLogger(__name__)
-
-DB_NAME = 'db/wsl_emb.db'
-VECTOR_TABLE_NAME = 'emb'
-FREQ_TABLE_NAME = ''
 
 def to_lemma(s_name, w_name):
     return s_name+':'+w_name
 
 class LexicalNet:
-    def __init__(self, db, v_table, f_table):
-        self.db = db
-        self.v_table = v_table
-        self.f_table = f_table
+    def __init__(self):
+        # defined in configs.py
+        self.db = DB_NAME
+        self.v_table = VECTOR_TABLE_NAME
+        self.f_table = FREQ_TABLE_NAME
+        # connect to database
         conn = sqlite3.connect(self.db)
         self.c = conn.cursor()
 
-    def get_freq(self, name, attr, lang):
-        # TODO
-        return 0
-
-    def get_vector(self, name, attr, lang):
-        if attr in ['synset', 'domain']:
-            sql = 'select vector from '+self.v_table+' where name="'+name+'" and attr="'+attr+'"'
+    def get_freq(self, name, attr, lang, categ):
+        if attr == 'lemma':
+            if categ==None:
+                res = self.WSLObj(name, attr, lang).to_WnObj().count()/LEMMA_COUNT
+            else:
+                sql = 'select freq from '+self.f_table+' where name="'+name+'" and lang="'+lang+'" and categ="'+categ+'"'
+                try:
+                    res =  float(self.c.execute(sql).fetchone()[0])
+                except:
+                    res = 0
         else:
-            sql = 'select vector from '+self.v_table+' where name="'+name+'" and attr="'+attr+'" and lang="'+lang+'"'
-        try:
-            vector =  np.array([float(x) for x in self.c.execute(sql).fetchone()[0].split(' ')])
-        except:
+            res = 0
+        return res
+
+    def get_vector(self, name, attr, lang, categ):
+        if attr in ['synset', 'domain', 'lemma']:
+            if attr in ['synset', 'domain']:
+                sql = 'select vector from '+self.v_table+' where name="'+name+'" and attr="'+attr+'"'
+            else:
+                sql = 'select vector from '+self.v_table+' where name="'+name+'" and attr="'+attr+'" and lang="'+lang+'"'
+            try:
+                vector =  np.array([float(x) for x in self.c.execute(sql).fetchone()[0].split(' ')])
+            except:
+                vector = np.zeros(300)
+        elif attr == 'word':
+            print(categ)
+            if categ==None:
+                sql = 'select vector from '+self.v_table+' where name="'+name+'" and attr="'+attr+'" and lang="'+lang+'"'
+                try:
+                    vector =  np.array([float(x) for x in self.c.execute(sql).fetchone()[0].split(' ')])
+                except:
+                    vector = np.zeros(300)
+            else:
+                vector = np.zeros(300)
+                for synset in wn.synsets(name):
+                    lemma = synset.name()+':'+name
+                    vector += self.get_freq(lemma, 'lemma', lang, categ)*self.get_vector(synset.name(), 'synset', lang, categ)
+        else:
             vector = np.zeros(300)
+
         return vector
 
     def all_synsets(self):
@@ -83,6 +110,9 @@ class LexicalNet:
             res.append(WSLObject(l_name, 'lemma', lang=lang))
         return res
 
+    def WSLObj(self, name, attr, lang):
+        return WSLObject(self, name, attr, lang=lang)
+
     def to_WSLObj(self, wn_obj):
         obj_name = wn_obj.__class__.__name__
         if obj_name == 'Synset':
@@ -98,18 +128,18 @@ class LexicalNet:
         return res
 
 # Object or word ,synset, lemma
-class WSLObject(LexicalNet):
+class WSLObject:
     def __init__(self, ln, name, attr, lang = 'None'):
         self.name = name
         self.attr = attr
         self.lang = lang
         self.ln = ln
 
-    def vector(self):
-        return self.ln.get_vector(self.name, self.attr, self.lang)
+    def vector(self, categ=None):
+        return self.ln.get_vector(self.name, self.attr, self.lang, categ)
 
-    def freq(self):
-        return self.ln.get_freq(self.name, self.attr, self.lang)
+    def freq(self, categ=None):
+        return self.ln.get_freq(self.name, self.attr, self.lang, categ)
 
     def __eq__(self, other):
         return self.__dict__ == other.__dict__
@@ -117,14 +147,14 @@ class WSLObject(LexicalNet):
     def __ne__(self, other):
         return not self.__eq__(other)
 
-    def to_WnObj(self):
+    def to_WnObj(self, lang='eng'):
         res = None
         if self.attr == 'synset':
             res = wn.synset(self.name)
         elif self.attr == 'lemma':
             synset = self.name.split(':')[0]
             word = self.name.split(':')[1]
-            for l in wn.synset(synset).lemmas():
+            for l in wn.synset(synset).lemmas(lang=lang):
                 if l.name() == word:
                     res = l
         elif self.attr == 'word':
@@ -134,11 +164,17 @@ class WSLObject(LexicalNet):
         return res
 
 class LexicalFeature:
-    def normalized_vector(self, o):
-        return o.vector()/np.sqrt(sum(o.vector()*o.vector()))
+    def normalized_vector(self, o, categ=None):
+        if categ == None:
+            vec = o.vector()
+        else:
+            vec = o.vector(categ=categ)
+        return vec/np.sqrt(sum(vec*vec))
 
-    def relatedness(self, o_in, o_out):
-        return sum(self.normalized_vector(o_in)*self.normalized_vector(o_out))
+    def relatedness(self, o_in, o_out, categ=None):
+        vec_in = self.normalized_vector(o_in, categ)
+        vec_out = self.normalized_vector(o_out, categ)
+        return sum(vec_in*vec_out)
 
     def topic_relatedness(self, tw, o, domain=False):
         if domain:
@@ -192,9 +228,11 @@ class LexicalFeature:
         return None
 
 if __name__=='__main__':
-    ln = LexicalNet(DB_NAME, VECTOR_TABLE_NAME, FREQ_TABLE_NAME)
+    ln = LexicalNet()
     synset = wn.synset('hot.a.01')
     word = 'hot'
+    lemma = 'hot.a.01:hot'
     synset = ln.to_WSLObj(synset)
     word = ln.to_WSLObj(word)
-    print(LexicalFeature().relatedness(synset, word))
+    lemma = ln.WSLObj('hot.a.02:hot', 'lemma', 'eng')
+    print(word.vector(categ='chocolate'))
